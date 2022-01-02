@@ -8,7 +8,6 @@ import subprocess
 import base64
 import random
 import wave
-import time
 from hashlib import blake2b
 
 from retico_core import *
