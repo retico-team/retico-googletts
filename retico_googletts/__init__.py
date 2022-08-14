@@ -1,3 +1,3 @@
 from retico_googletts.googletts import *
 
-__version__ = "0.1.0"
+from retico_googletts.version import __version__

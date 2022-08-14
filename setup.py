@@ -13,7 +13,7 @@ try:
 except ImportError:
     from distutils.core import setup
 
-import retico_googletts
+exec(open("retico_googletts/version.py").read())
 
 import pathlib
 
@@ -29,7 +29,7 @@ config = {
     "author_email": "uhlomuhlo@gmail.com",
     "url": "https://github.com/retico-team/retico-googletts",
     "download_url": "https://github.com/retico-team/retico-googletts",
-    "version": retico_googletts.__version__,
+    "version": __version__,
     "python_requires": ">=3.6, <4",
     "keywords": "retico, framework, incremental, dialogue, dialog",
     "install_requires": ["retico-core~=0.2"],
