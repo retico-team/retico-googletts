@@ -261,7 +261,7 @@ class GoogleTTSModule(AbstractModule):
         self.gtts.gcloud_token(use_cache=False)
 
     def get_text(self):
-        return "".join([iu.get_text() for iu in self.current_ius])
+        return " ".join([iu.get_text() for iu in self.current_ius])
 
     def process_update(self, update_message):
         last_iu = None
@@ -279,5 +279,7 @@ class GoogleTTSModule(AbstractModule):
             nframes = len(raw_audio) / self.sample_width
             output_iu.set_audio(raw_audio, nframes, self.rate, self.sample_width)
             output_iu.dispatch = last_iu.dispatch
+            if last_iu.dispatch:
+                self.current_ius = []
             return UpdateMessage.from_iu(output_iu, UpdateType.ADD)
         return None
