@@ -9,8 +9,10 @@ import base64
 import random
 import wave
 from hashlib import blake2b
+import time
+import threading
 
-from retico_core import *
+import retico_core
 
 # Helper functions ==============
 
@@ -40,8 +42,8 @@ class GoogleTTS:
     This class relies on gcloud and ffmpeg to be installed and available.
     """
 
-    CACHING_DIR = "data/gtts_cache/"
-    TEMP_DIR = "/tmp"
+    CACHING_DIR = "~/.cache/gtts_cache/"
+    TEMP_DIR = "~/.cache/tmp_tts"
     TEMP_NAME = "tmp_tts_%s" % random.randint(1000, 10000)
 
     def __init__(
@@ -225,7 +227,7 @@ class GoogleTTS:
         return wav_audio
 
 
-class GoogleTTSModule(AbstractModule):
+class GoogleTTSModule(retico_core.AbstractModule):
     """A Google TTS Module that uses Googles TTS service to synthesize audio."""
 
     @staticmethod
@@ -238,14 +240,21 @@ class GoogleTTSModule(AbstractModule):
 
     @staticmethod
     def input_ius():
-        return [text.GeneratedTextIU]
+        return [retico_core.text.TextIU]
 
     @staticmethod
     def output_iu():
-        return audio.SpeechIU
+        return retico_core.audio.SpeechIU
 
     def __init__(
-        self, language_code, voice_name, speaking_rate=1.4, caching=True, **kwargs
+        self,
+        language_code,
+        voice_name,
+        speaking_rate=1.4,
+        caching=True,
+        frame_duration=0.05,
+        samplerate=44100,
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.language_code = language_code
@@ -253,33 +262,94 @@ class GoogleTTSModule(AbstractModule):
         self.speaking_rate = speaking_rate
         self.caching = caching
         self.gtts = GoogleTTS(language_code, voice_name, speaking_rate, caching)
-        self.sample_width = 2
-        self.rate = 44100
+        self.samplewidth = 2
+        self.samplerate = samplerate
+        self.frame_duration = frame_duration
+
+        self._latest_text = ""
+        self.latest_input_iu = None
+        self.audio_buffer = []
+        self._tts_thread_active = False
+        self.audio_pointer = 0
+        self.clear_after_finish = False
 
     def setup(self):
         # We create the token on setup so that the first synthesis will not take long.
         self.gtts.gcloud_token(use_cache=False)
 
     def get_text(self):
-        return " ".join([iu.get_text() for iu in self.current_ius])
+        return " ".join([iu.get_text() for iu in self.current_input])
 
     def process_update(self, update_message):
-        last_iu = None
+        if not update_message:
+            return None
         for iu, ut in update_message:
-            if ut == UpdateType.ADD:
-                self.current_ius.append(iu)
-            elif ut == UpdateType.REVOKE:
+            if ut == retico_core.UpdateType.ADD:
+                self.current_input.append(iu)
+                self.latest_input_iu = iu
+            elif ut == retico_core.UpdateType.REVOKE:
                 self.revoke(iu)
-            last_iu = iu
-        if last_iu:
-            print("Synthesizing:", self.get_text())
-            print(last_iu.dispatch)
-            output_iu = self.create_iu(last_iu)
-            raw_audio = self.gtts.tts(self.get_text())
-            nframes = len(raw_audio) / self.sample_width
-            output_iu.set_audio(raw_audio, nframes, self.rate, self.sample_width)
-            output_iu.dispatch = last_iu.dispatch
-            if last_iu.dispatch:
-                self.current_ius = []
-            return UpdateMessage.from_iu(output_iu, UpdateType.ADD)
+            elif ut == retico_core.UpdateType.COMMIT:
+                self.commit(iu)
+        current_text = self.get_text()
+
+        if self.input_committed() or len(current_text) - len(self._latest_text) > 40:
+            self._latest_text = current_text
+            chunk_size = int(self.samplerate * self.frame_duration)
+            chunk_size_bytes = chunk_size * self.samplewidth
+            new_audio = self.gtts.tts(current_text)
+            i = 0
+            new_buffer = []
+            while i < len(new_audio):
+                chunk = new_audio[i : i + chunk_size_bytes]
+                if len(chunk) < chunk_size_bytes:
+                    chunk = chunk + b"\x00" * (chunk_size_bytes - len(chunk))
+                new_buffer.append(chunk)
+                i += chunk_size_bytes
+            if self.clear_after_finish:
+                self.audio_buffer.extend(new_buffer)
+            else:
+                self.audio_buffer = new_buffer
+        if self.input_committed():
+            self.clear_after_finish = True
+            self.current_input = []
         return None
+
+    def _tts_thread(self):
+        t1 = time.time()
+        while self._tts_thread_active:
+            t2 = t1
+            t1 = time.time()
+            if t1 - t2 < self.frame_duration:
+                time.sleep(self.frame_duration)
+            else:
+                time.sleep(max((2 * self.frame_duration) - (t1 - t2), 0))
+
+            if self.audio_pointer >= len(self.audio_buffer):
+                raw_audio = (
+                    b"\x00"
+                    * self.samplewidth
+                    * int(self.samplerate * self.frame_duration)
+                )
+                if self.clear_after_finish:
+                    self.audio_pointer = 0
+                    self.audio_buffer = []
+                    self.clear_after_finish = False
+            else:
+                raw_audio = self.audio_buffer[self.audio_pointer]
+                self.audio_pointer += 1
+            iu = self.create_iu(self.latest_input_iu)
+            iu.set_audio(raw_audio, 1, self.samplerate, self.samplewidth)
+            um = retico_core.UpdateMessage.from_iu(iu, retico_core.UpdateType.ADD)
+            self.append(um)
+
+    def prepare_run(self):
+        self.audio_pointer = 0
+        self.audio_buffer = []
+        self._tts_thread_active = True
+        self.clear_after_finish = False
+        self._latest_text = ""
+        threading.Thread(target=self._tts_thread).start()
+
+    def shutdown(self):
+        self._tts_thread_active = False
