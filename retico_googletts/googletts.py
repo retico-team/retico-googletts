@@ -1,39 +1,17 @@
 """
 A module that uses Google TTS to create speech from text.
 """
-import http.client
-import json
 import os
 import subprocess
-import base64
+import shutil
 import random
 import wave
 from hashlib import blake2b
 import time
 import threading
+from google.cloud import texttospeech as tts
 
 import retico_core
-
-# Helper functions ==============
-
-
-def get_gcloud_token():
-    """Return the gcloud access token as a string.
-
-    This functions requires the gcloud executable to be available in the path
-    variable.
-
-    Return (str): The gcloud access token
-    """
-    outs = subprocess.check_output(
-        ["gcloud", "auth", "application-default", "print-access-token"]
-    )
-    outs = outs.decode("utf-8")
-    return outs.strip()
-
-
-# =================
-
 
 class GoogleTTS:
     """
@@ -49,8 +27,8 @@ class GoogleTTS:
     def __init__(
         self,
         language_code="en-US",
-        voice_name="en-US-Wavenet-A",
-        speaking_rate=1.4,
+        voice_name="en-US-Standard-G",
+        speaking_rate=1,
         caching=True,
     ):
         """
@@ -59,36 +37,21 @@ class GoogleTTS:
 
         Args:
             language_code (str): The language code specified by google cloud (e.g. en-US or de-DE)
-            voice_name (str): The name of the voice specified by google cloude
+            voice_name (str): The name of the voice specified by google cloud
             caching (bool): Whether the tts should cache the speech.
         """
         self.language_code = language_code
         self.voice_name = voice_name
-        self.ssml_gender = "FEMALE"
         self.caching = caching
-        self._gcloud_token = None
         self.speaking_rate = speaking_rate
 
         self.wav_sample_rate = 44100  # 44100 sample rate / See ffmpeg
         self.wav_codec = "pcm_s16le"  # 16-bit little endian codec / See ffmpeg
+        self.client = None
 
         # Create caching directory if it not already exists
         if not os.path.exists(self.CACHING_DIR):
             os.makedirs(self.CACHING_DIR)
-
-    def gcloud_token(self, use_cache=True):
-        """Return the gcloud token.
-        The gcloud token is cached, so it is only retrieved once for every instance of the GoogleTTS class
-
-        Args:
-            use_cache (bool): Whether the method should use the cache or if it should retrieve the token from the
-                gcloud application.
-
-        Returns (str): The gcloud access token.
-        """
-        if not use_cache or self._gcloud_token is None:
-            self._gcloud_token = get_gcloud_token()
-        return self._gcloud_token
 
     def get_cache_path(self, text):
         """
@@ -145,38 +108,26 @@ class GoogleTTS:
         Returns (bytes): Audio data in MP3 format as bytes.
 
         """
-        request_data = {
-            "input": {"text": text},
-            "voice": {
-                "languageCode": self.language_code,
-                "name": self.voice_name,
-                "ssmlGender": self.ssml_gender,
-            },
-            "audioConfig": {
-                "speakingRate": self.speaking_rate,
-                "audioEncoding": "MP3",
-            },  # We always use MP3 audio encoding, because it is fast to download.
-        }  # We convert that later on to the format we want
-
-        json_data = json.dumps(request_data)
-
-        # XXX: This API is in beta and might change
-        h1 = http.client.HTTPSConnection("texttospeech.googleapis.com")
-        h1.request(
-            "POST",
-            "/v1beta1/text:synthesize",
-            headers={
-                "Authorization": "Bearer %s" % self.gcloud_token(),
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            body=json_data,
+        
+        synthesis_input = tts.SynthesisInput(text=text)
+        
+        voice = tts.VoiceSelectionParams(
+            language_code=self.language_code,
+            name=self.voice_name,
         )
-
-        r1 = h1.getresponse()
-        response = r1.read()
-        base64_response = json.loads(response)
-        audio_data = base64.b64decode(base64_response["audioContent"])
-        return audio_data
+        
+        audio_config = tts.AudioConfig(
+            audio_encoding=tts.AudioEncoding.MP3,
+            speaking_rate=self.speaking_rate,
+        )
+        
+        response = self.client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config,
+        )
+        
+        return response.audio_content
 
     def convert_audio(self, audio):
         """
@@ -190,6 +141,9 @@ class GoogleTTS:
             contain the wave header (or any other header) but is just the raw audio data.
 
         """
+        
+        os.makedirs(self.TEMP_DIR, exist_ok=True)
+        
         tmp_mp3_name = self.TEMP_NAME + ".mp3"
         tmp_wav_name = self.TEMP_NAME + ".wav"
         tmp_mp3_path = os.path.join(self.TEMP_DIR, tmp_mp3_name)
@@ -248,11 +202,11 @@ class GoogleTTSModule(retico_core.AbstractModule):
 
     def __init__(
         self,
-        language_code,
-        voice_name,
-        speaking_rate=1.4,
+        language_code="en-US",
+        voice_name="en-US-Standard-G",
+        speaking_rate=1,
         caching=True,
-        frame_duration=0.05,
+        frame_duration=0.2,
         samplerate=44100,
         **kwargs,
     ):
@@ -265,6 +219,7 @@ class GoogleTTSModule(retico_core.AbstractModule):
         self.samplewidth = 2
         self.samplerate = samplerate
         self.frame_duration = frame_duration
+        self.nframes = int(self.samplerate * self.frame_duration)
 
         self._latest_text = ""
         self.latest_input_iu = None
@@ -274,8 +229,7 @@ class GoogleTTSModule(retico_core.AbstractModule):
         self.clear_after_finish = False
 
     def setup(self):
-        # We create the token on setup so that the first synthesis will not take long.
-        self.gtts.gcloud_token(use_cache=False)
+        self.gtts.client = tts.TextToSpeechClient()
 
     def get_text(self):
         return " ".join([iu.get_text() for iu in self.current_input])
@@ -329,8 +283,10 @@ class GoogleTTSModule(retico_core.AbstractModule):
                 raw_audio = (
                     b"\x00"
                     * self.samplewidth
-                    * int(self.samplerate * self.frame_duration)
+                    * self.nframes
                 )
+                dispatch = False
+                
                 if self.clear_after_finish:
                     self.audio_pointer = 0
                     self.audio_buffer = []
@@ -338,8 +294,11 @@ class GoogleTTSModule(retico_core.AbstractModule):
             else:
                 raw_audio = self.audio_buffer[self.audio_pointer]
                 self.audio_pointer += 1
+                dispatch = True
+                
             iu = self.create_iu(self.latest_input_iu)
-            iu.set_audio(raw_audio, 1, self.samplerate, self.samplewidth)
+            iu.set_audio(raw_audio, self.nframes, self.samplerate, self.samplewidth)
+            iu.dispatch = dispatch
             um = retico_core.UpdateMessage.from_iu(iu, retico_core.UpdateType.ADD)
             self.append(um)
 
@@ -353,3 +312,4 @@ class GoogleTTSModule(retico_core.AbstractModule):
 
     def shutdown(self):
         self._tts_thread_active = False
+        shutil.rmtree(self.gtts.TEMP_DIR, ignore_errors=True)
