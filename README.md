@@ -7,32 +7,26 @@ up [here](https://cloud.google.com/text-to-speech/docs/voices).
 The current implementation of the TTS module is not strictly incremental, as a new input
 triggers a complete resynthesizing of the speech.
 
-## How to install
+## Installing
 
-Although the installation of retico-googletts only requires
-[retico-core](https://github.com/retico-team/retico-core), there are a few software
-dependencies that have to be installed manually
+In order to properly use the Text-To-Speech module, you must install two other external software.
 
-### GCloud
+#### gcloud
+This is to connect you to GCP's (Google Cloud Platform) resources and services which you can install [here](https://docs.cloud.google.com/text-to-speech/docs/get-started).
 
-For the authentication with the Google TTS API, the command line argument `gcloud` has
-to be availbale. For information visit the [Google Cloud Documentation](https://cloud.google.com/text-to-speech/docs/create-audio-text-client-libraries#client-libraries-install-python). To validate that
-the access work, the following command has to return the access token to authenticate
-the use of the API:
+#### ffmpeg
+
+This is for converting the received MP3 audio from Google's Text-To-Speech synthesizer into a PCM format which can be installed [here](https://ffmpeg.org/download.html).
+
+
+After installing both external software, you can now install the package with
 
 ```bash
-$ gcloud auth print-access-token
+$ pip install git+https://github.com/retico-team/retico-googletts
 ```
 
-### ffmpeg
 
-In order to convert the received audio files into the proper format, retico-googletts
-requires [ffmpeg](https://ffmpeg.org/download.html).
-
-## Documentation
-
-Sadly, there is no proper documentation for retico-googletts right now, but you can 
-start using the GoogleTTSModule like this:
+## GoogleTTS Example
 
 ```python
 from retico_core import *
@@ -45,25 +39,37 @@ def callback(update_msg):
         print(f"{ut}: {x.text} ({x.stability}) - {x.final}")
 
 
-m1 = audio.MicrophoneModule()
-m2 = GoogleASRModule()
-m3 = text.TextDispatcherModule()
-m4 = GoogleTTSModule("en-US", "en-US-Wavenet-A")
-m5 = audio.AudioDispatcherModule(target_frame_length=0.2)
-m6 = audio.StreamingSpeakerModule(frame_length=0.2)
-m7 = debug.CallbackModule(callback)
+mic = audio.MicrophoneModule()
+asr = GoogleASRModule(rate=16_000)
+td = text.TextDispatcherModule()
+tts = GoogleTTSModule(language_code="en-US", voice_name="en-US-Standard-G")
+ad = audio.AudioDispatcherModule(target_frame_length=0.2)
+ss = audio.StreamingSpeakerModule(frame_length=0.2)
+cb = debug.CallbackModule(callback)
 
-m1.subscribe(m2)
-m2.subscribe(m3)
-m3.subscribe(m4)
-m4.subscribe(m5)
-m2.subscribe(m7)
-m5.subscribe(m6)
+mic.subscribe(asr)
+asr.subscribe(td)
+td.subscribe(tts)
+tts.subscribe(ad)
+asr.subscribe(cb)
+ad.subscribe(ss)
 
-network.run(m1)
+mic.run()
+asr.run()
+td.run()
+tts.run()
+ad.run()
+ss.run()
+cb.run()
 
 print("Running")
 input()
 
-network.stop(m1)
+mic.stop()
+asr.stop()
+td.stop()
+tts.stop()
+ad.stop()
+ss.stop()
+cb.stop()
 ```
