@@ -174,9 +174,6 @@ class GoogleTTS:
             w_length = wav_file.getnframes()
             wav_audio = wav_file.readframes(w_length)
 
-        # Cleanup
-        os.remove(tmp_mp3_path)
-        os.remove(tmp_wav_path)
 
         return wav_audio
 
@@ -208,6 +205,7 @@ class GoogleTTSModule(retico_core.AbstractModule):
         caching=True,
         frame_duration=0.2,
         samplerate=44100,
+        dispatch_on_finish=True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -227,6 +225,7 @@ class GoogleTTSModule(retico_core.AbstractModule):
         self._tts_thread_active = False
         self.audio_pointer = 0
         self.clear_after_finish = False
+        self.dispatch_on_finish = dispatch_on_finish
 
     def setup(self):
         self.gtts.client = tts.TextToSpeechClient()
@@ -235,6 +234,7 @@ class GoogleTTSModule(retico_core.AbstractModule):
         return " ".join([iu.get_text() for iu in self.current_input])
 
     def process_update(self, update_message):
+        final = False
         if not update_message:
             return None
         for iu, ut in update_message:
@@ -244,10 +244,10 @@ class GoogleTTSModule(retico_core.AbstractModule):
             elif ut == retico_core.UpdateType.REVOKE:
                 self.revoke(iu)
             elif ut == retico_core.UpdateType.COMMIT:
-                self.commit(iu)
+                final = True
         current_text = self.get_text()
 
-        if self.input_committed() or len(current_text) - len(self._latest_text) > 40:
+        if final or (len(current_text) - len(self._latest_text) > 40 and not self.dispatch_on_finish):
             self._latest_text = current_text
             chunk_size = int(self.samplerate * self.frame_duration)
             chunk_size_bytes = chunk_size * self.samplewidth
@@ -264,7 +264,7 @@ class GoogleTTSModule(retico_core.AbstractModule):
                 self.audio_buffer.extend(new_buffer)
             else:
                 self.audio_buffer = new_buffer
-        if self.input_committed():
+        if final:
             self.clear_after_finish = True
             self.current_input = []
         return None
